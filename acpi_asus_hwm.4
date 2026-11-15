@@ -1,0 +1,212 @@
+.\"
+.\" Copyright (c) 2026 Pouria Mousavizadeh Tehrani <pouria@FreeBSD.org>
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd November 15, 2026
+.Dt ACPI_ASUS_HWM 4
+.Os
+.Sh NAME
+.Nm acpi_asus_hwm
+.Nd ASUS motherboard fan monitoring and control
+.Sh SYNOPSIS
+To load the driver as a
+module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+acpi_asus_hwm_load="YES"
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+driver provides fan speed monitoring and fan duty cycle control for ASUS
+desktop motherboards with a Nuvoton NCT6791D, NCT6792D, NCT6793D, NCT6795D,
+NCT6796D, NCT6797D, NCT6798D or NCT6799D Super I/O chip.
+.Pp
+On these boards the firmware owns the Super I/O ports, but provides access
+to the hardware monitor through the
+.Dq WMBD
+method of an ACPI WMI device whose
+.Dv _UID
+is
+.Dq AsusMbSwInterface
+or
+.Dq ASUSWMI .
+The driver attaches as a child of
+.Xr acpi_wmi 4
+on that device, and performs all register accesses through the firmware.
+.Pp
+By default every fan follows the curve configured in the firmware setup
+utility.
+A fan can be switched to manual control, after which its duty cycle is
+set through
+.Xr sysctl 8 ,
+or through the
+.Xr pwmc 4
+interface described below.
+When the driver is unloaded, or the system shuts down or suspends, every
+fan under manual control is handed back to the firmware with the settings
+it had when the driver attached.
+After a resume, all fans are under firmware control.
+.Sh SYSCTL VARIABLES
+The following variables are available for each fan header
+.Ar N ,
+starting at 1:
+.Bl -tag -width indent
+.It Va dev.acpi_asus_hwm.0.fan Ns Ar N Ns Va .rpm
+Fan speed in revolutions per minute (read-only).
+It reads 0 when nothing is connected to the header, and when the fan has
+stopped.
+.It Va dev.acpi_asus_hwm.0.fan Ns Ar N Ns Va .manual
+Set to 1 to put the fan under manual control, or 0 to return it to the
+firmware curve.
+Switching to manual control keeps the current duty cycle, so the fan speed
+does not change until
+.Va pwm
+is written.
+.It Va dev.acpi_asus_hwm.0.fan Ns Ar N Ns Va .pwm
+Fan duty cycle, from 0 (off) to 255 (full speed).
+Under firmware control this reports the duty cycle chosen by the firmware,
+and writing it fails with
+.Er EBUSY .
+Under manual control it can be written.
+.El
+.Pp
+Writable variables are only accessible to the superuser.
+.Sh PWM INTERFACE
+The driver registers a
+.Xr pwmbus 9
+controller with one channel per fan header, so each fan also appears as a
+.Xr pwmc 4
+device that
+.Xr pwm 8
+and daemons such as
+.Nm fand
+.Pq Pa sysutils/fand
+can drive.
+Channel
+.Ar N Ns \-1
+controls fan
+.Ar N .
+.Pp
+The channel state maps onto the fan as follows:
+.Bl -tag -width "duty, period"
+.It enable
+Enabling the channel puts the fan under manual control, as
+.Va manual Ns =1
+does.
+Disabling it returns the fan to the firmware curve.
+A disabled channel never stops the fan.
+.It "duty, period"
+The duty cycle is scaled to the 8-bit fan duty register relative to the
+period, so only the ratio matters.
+The default period is 40000 ns (25 kHz, the PWM fan standard).
+A period of 0 is rejected with
+.Er EINVAL ,
+because it would turn every percentage into a duty cycle of 0.
+While the channel is disabled, the reported duty cycle is the one chosen by
+the firmware.
+.It flags
+Inverted polarity is not supported and is rejected with
+.Er EINVAL .
+.El
+.Sh FILES
+.Bl -tag -width "/dev/pwm/pwmcX.Y" -compact
+.It Pa /dev/pwm/pwmc Ns Ar X . Ns Ar Y
+.Xr pwmc 4
+device for channel
+.Ar Y
+of PWM controller
+.Ar X .
+.El
+.Sh EXAMPLES
+Run fan 2 at about 60% of full speed:
+.Bd -literal -offset indent
+sysctl dev.acpi_asus_hwm.0.fan2.manual=1
+sysctl dev.acpi_asus_hwm.0.fan2.pwm=153
+.Ed
+.Pp
+Return it to the firmware curve:
+.Bd -literal -offset indent
+sysctl dev.acpi_asus_hwm.0.fan2.manual=0
+.Ed
+.Pp
+The same with
+.Xr pwm 8 :
+.Bd -literal -offset indent
+pwm -f pwmc0.1 -E -p 40000 -d 60%
+pwm -f pwmc0.1 -D
+.Ed
+.Pp
+Let
+.Nm fand
+drive fan 2 from the temperature of CPU 0: 40% from 50\(deC, full speed from
+75\(deC, and back to the firmware curve below 45\(deC.
+In
+.Xr rc.conf 5 :
+.Bd -literal -offset indent
+fand_enable="YES"
+fand_sensor="dev.cpu.0.temperature"
+fand_device="pwmc0.1"
+fand_temp="50"
+fand_off_temp="45"
+fand_period="40000"
+fand_duty="40%"
+fand_multiplier="0.1"
+fand_flags="-T 75 -P 40000 -D 100% -i 5"
+.Ed
+.Pp
+.Va fand_multiplier
+converts the tenths of a kelvin reported by
+.Xr coretemp 4 .
+.Sh DIAGNOSTICS
+.Bl -diag
+.It "acpi_asus_hwm0: Unsupported chip (id %#06x, chip id %#04x)"
+The firmware gives access to a Super I/O chip that the driver does not
+know, and the driver did not attach.
+.It "acpi_asus_hwm0: Couldn't restore firmware control of fan%d"
+The fan could not be handed back to the firmware.
+It keeps its last manual duty cycle until the next reboot.
+.El
+.Sh SEE ALSO
+.Xr acpi 4 ,
+.Xr acpi_asus_wmi 4 ,
+.Xr acpi_wmi 4 ,
+.Xr coretemp 4 ,
+.Xr pwmc 4 ,
+.Xr rc.conf 5 ,
+.Xr sysctl.conf 5 ,
+.Xr pwm 8 ,
+.Xr sysctl 8 ,
+.Xr pwmbus 9
+.Sh HISTORY
+The
+.Nm
+driver first appeared as a port in 2026.
+.Sh AUTHORS
+.An Pouria Mousavizadeh Tehrani Aq Mt pouria@FreeBSD.org
+.Sh CAVEATS
+Under manual control the fan runs at the requested duty cycle regardless
+of temperature.
+Fans differ at low duty cycles: some keep a built-in minimum speed and
+ignore lower values, while others stop and report 0 RPM.
+The CPU cooler, and the pump of a liquid cooler, must never be stopped:
+the processor can overheat within seconds.
+A stopped pump is easy to miss, because the radiator fans keep spinning
+and the firmware raises their speed as the processor heats up, so the
+system gets louder rather than quieter.
+Check
+.Va rpm
+after every change, and keep the CPU temperature in view with
+.Xr coretemp 4 .
+.Pp
+The mapping from
+.Ar N
+to the header names printed on the board varies between models.
+.Pp
+.Nm fand
+does not hand the fan back when it is stopped, so the fan keeps its last
+duty cycle.
+Disable the channel afterwards with
+.Ql pwm -f pwmc0.1 -D ,
+or unload the driver.
